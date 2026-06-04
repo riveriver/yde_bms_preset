@@ -5,9 +5,9 @@ YDE BMS preset tool over Modbus RTU or Modbus TCP.
 Examples:
   python bms_preset.py
   python bms_preset.py factory --mode rtu --port COM3
-  python bms_preset.py factory --mode tcp --ip 192.168.1.20
   python bms_preset.py get-address --mode rtu --port COM3
-  python bms_preset.py set-address --mode tcp --ip 192.168.1.20 --address 2
+  python bms_preset.py set-address --mode tcp --ip 192.168.1.20 --uid 2 --address 3
+  python bms_preset.py set-capacity --mode tcp --ip 192.168.1.20 --uid 2 --capacity 40
   python bms_preset.py set-capacity --mode rtu --port COM3 --capacity 40
 """
 
@@ -43,12 +43,13 @@ class BmsError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass
 class ConnectionConfig:
     mode: str
     serial_port: str | None
     tcp_ip: str | None
     tcp_port: int
+    uid: int | None
     baudrate: int
     parity: str
     stopbits: float
@@ -98,6 +99,7 @@ def print_connection_config(config: ConnectionConfig) -> None:
         print(f"Serial : {config.serial_port}  {config.baudrate} {config.bytesize}{config.parity}{config.stopbits:g}")
     else:
         print(f"TCP    : {config.tcp_ip}:{config.tcp_port}")
+        print(f"UID    : {config.uid} (0x{config.uid:02X})")
     print_line()
 
 
@@ -303,6 +305,23 @@ def set_address(config: ConnectionConfig, target_address: int = TARGET_SLAVE_ADD
     print("")
     print(f"Step: ensure BMS address is {target_address} (0x{target_address:02X})")
 
+    if config.mode == "tcp":
+        if config.uid is None:
+            raise BmsError("TCP UID is not configured")
+        current_uid = config.uid
+        print("")
+        print(f"Step: write address register from {current_uid} to {target_address}")
+        pdu = build_write_single_register_pdu(ADDR_REGISTER, target_address)
+        request = build_request(config, current_uid, pdu)
+        response = transact(config, request, expected_len=8)
+        if config.dry_run:
+            print("Result: dry-run only; address was not written.")
+            return
+        ensure_write_echo(config, request, response)
+        config.uid = target_address
+        print(f"Result: address changed from {current_uid} to {target_address}.")
+        return
+
     current_address = get_address(config)
     if current_address is None:
         pdu = build_write_single_register_pdu(ADDR_REGISTER, target_address)
@@ -327,14 +346,21 @@ def set_address(config: ConnectionConfig, target_address: int = TARGET_SLAVE_ADD
     print(f"Result: address changed from {current_address} to {target_address}.")
 
 
-def prompt_command() -> str:
-    menu_items = (
-        ("1", "factory", "Set factory parameters: address 2, capacity 40Ah"),
-        ("2", "get-address", "Read slave address by broadcast"),
-        ("3", "set-address", "Set slave address by user input"),
-        ("4", "set-capacity", "Set nominal capacity by user input"),
-        ("0", "exit", "Exit"),
-    )
+def prompt_command(config: ConnectionConfig) -> str:
+    if config.mode == "tcp":
+        menu_items = (
+            ("1", "set-address", "Set slave address by user input"),
+            ("2", "set-capacity", "Set nominal capacity by user input"),
+            ("0", "exit", "Exit"),
+        )
+    else:
+        menu_items = (
+            ("1", "factory", "Set factory parameters: address 2, capacity 40Ah"),
+            ("2", "get-address", "Read slave address by broadcast"),
+            ("3", "set-address", "Set slave address by user input"),
+            ("4", "set-capacity", "Set nominal capacity by user input"),
+            ("0", "exit", "Exit"),
+        )
 
     print("")
     print_line()
@@ -415,6 +441,10 @@ def prompt_tcp_port(default: int = 502) -> int:
     return port
 
 
+def prompt_uid() -> int:
+    return prompt_int("TCP UID (1-247): ", 1, 247)
+
+
 def build_config(args: argparse.Namespace) -> ConnectionConfig:
     mode = args.mode
     if mode is None and args.ip:
@@ -427,6 +457,7 @@ def build_config(args: argparse.Namespace) -> ConnectionConfig:
     serial_port = None
     tcp_ip = None
     tcp_port = args.tcp_port or 502
+    uid = None
 
     if mode == "rtu":
         serial_port = args.port or prompt_port()
@@ -436,12 +467,16 @@ def build_config(args: argparse.Namespace) -> ConnectionConfig:
             tcp_port = prompt_tcp_port(502)
         elif not 1 <= tcp_port <= 65535:
             raise BmsError(f"TCP port must be between 1 and 65535: {tcp_port}")
+        uid = args.uid if args.uid is not None else prompt_uid()
+        if not 1 <= uid <= 247:
+            raise BmsError(f"TCP UID must be between 1 and 247: {uid}")
 
     config = ConnectionConfig(
         mode=mode,
         serial_port=serial_port,
         tcp_ip=tcp_ip,
         tcp_port=tcp_port,
+        uid=uid,
         baudrate=args.baudrate,
         parity=args.parity,
         stopbits=args.stopbits,
@@ -493,9 +528,13 @@ def capacity_ah_to_register_value(capacity_ah: float) -> int:
 def set_capacity_value(
     config: ConnectionConfig,
     capacity_ah: float,
-    slave_addr: int = TARGET_SLAVE_ADDR,
+    slave_addr: int | None = None,
 ) -> None:
     register_value = capacity_ah_to_register_value(capacity_ah)
+    if slave_addr is None:
+        slave_addr = config.uid if config.mode == "tcp" else TARGET_SLAVE_ADDR
+    if slave_addr is None:
+        raise BmsError("slave address is not configured")
 
     print("")
     print("Step: write nominal capacity")
@@ -530,8 +569,12 @@ def run_command(
     print_line()
 
     if command == "factory":
+        if config.mode == "tcp":
+            raise BmsError("factory setup is not available in Modbus TCP mode")
         run_factory(config)
     elif command == "get-address":
+        if config.mode == "tcp":
+            raise BmsError("broadcast address discovery is not available in Modbus TCP mode")
         get_address(config)
     elif command == "set-address":
         if address is None:
@@ -544,6 +587,8 @@ def run_command(
             capacity_ah = prompt_float("Nominal capacity in Ah: ", 0.1, 6553.5)
         set_capacity_value(config, capacity_ah, TARGET_SLAVE_ADDR)
     elif command == "preset":
+        if config.mode == "tcp":
+            raise BmsError("preset is not available in Modbus TCP mode")
         run_factory(config)
     else:
         raise BmsError(f"unknown command: {command}")
@@ -551,7 +596,7 @@ def run_command(
 
 def interactive_loop(config: ConnectionConfig) -> None:
     while True:
-        command = prompt_command()
+        command = prompt_command(config)
         if command == "exit":
             print("Exit.")
             return
@@ -579,6 +624,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("rtu", "tcp"), help="Communication mode.")
     parser.add_argument("--port", help="RTU serial port, for example COM3.")
     parser.add_argument("--ip", help="Modbus TCP IP address.")
+    parser.add_argument(
+        "--uid",
+        type=lambda value: int(value, 0),
+        help="Modbus TCP Unit ID, required in TCP mode, for example 2 or 0x02.",
+    )
     parser.add_argument(
         "--tcp-port",
         type=int,
