@@ -22,7 +22,8 @@ from dataclasses import dataclass
 
 BROADCAST_READ_ADDR = 0xFF
 TARGET_SLAVE_ADDR = 0x02
-ADDR_REGISTER = 0x0000
+ADDRESS_READ_REGISTER = 0x0000
+ADDRESS_WRITE_REGISTER = 0x0064
 CAPACITY_REGISTER = 0x0068
 CAPACITY_40AH_VALUE = 0x0190
 
@@ -289,7 +290,7 @@ def get_address(config: ConnectionConfig) -> int | None:
     print("")
     print("Step: read address register by broadcast")
 
-    pdu = build_read_input_registers_pdu(ADDR_REGISTER, 1)
+    pdu = build_read_input_registers_pdu(ADDRESS_READ_REGISTER, 1)
     request = build_request(config, BROADCAST_READ_ADDR, pdu)
     response = transact(config, request, expected_len=7)
     if config.dry_run:
@@ -311,7 +312,7 @@ def set_address(config: ConnectionConfig, target_address: int = TARGET_SLAVE_ADD
         current_uid = config.uid
         print("")
         print(f"Step: write address register from {current_uid} to {target_address}")
-        pdu = build_write_single_register_pdu(ADDR_REGISTER, target_address)
+        pdu = build_write_single_register_pdu(ADDRESS_WRITE_REGISTER, target_address)
         request = build_request(config, current_uid, pdu)
         response = transact(config, request, expected_len=8)
         if config.dry_run:
@@ -324,7 +325,7 @@ def set_address(config: ConnectionConfig, target_address: int = TARGET_SLAVE_ADD
 
     current_address = get_address(config)
     if current_address is None:
-        pdu = build_write_single_register_pdu(ADDR_REGISTER, target_address)
+        pdu = build_write_single_register_pdu(ADDRESS_WRITE_REGISTER, target_address)
         request = build_request(config, target_address, pdu)
         print("")
         print("Dry-run note: current address is unknown, so this write frame is only a template.")
@@ -339,7 +340,7 @@ def set_address(config: ConnectionConfig, target_address: int = TARGET_SLAVE_ADD
     print("")
     print(f"Step: write address register from {current_address} to {target_address}")
 
-    pdu = build_write_single_register_pdu(ADDR_REGISTER, target_address)
+    pdu = build_write_single_register_pdu(ADDRESS_WRITE_REGISTER, target_address)
     request = build_request(config, current_address, pdu)
     response = transact(config, request, expected_len=8)
     ensure_write_echo(config, request, response)
